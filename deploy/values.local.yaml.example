@@ -1,0 +1,29 @@
+# ============================================================
+# 本地密钥覆盖文件 —— 示例
+# ============================================================
+# 用法：
+#   cp deploy/values.local.yaml.example deploy/values.local.yaml
+#   # 生成四个真密钥填进去：
+#   openssl rand -hex 16   # → dbPassword
+#   openssl rand -hex 16   # → redisPassword
+#   openssl rand -hex 32   # → jwtSecret
+#   openssl rand -hex 16   # → systemAesKey（必须恰好 32 字节，长度不对启动即崩）
+#
+#   helm upgrade --install weknora ./chart \
+#     -n weknora \
+#     -f deploy/values.yaml \
+#     -f deploy/values.local.yaml
+#
+# ⚠️ values.local.yaml 已被 .gitignore 忽略，绝不会进仓库。请勿改这个策略。
+# ⚠️ 若要在已有数据的集群上重装，systemAesKey 必须与旧值完全一致，
+#    否则已加密的模型 api_key 永久解不开。
+# ============================================================
+
+secrets:
+  dbUser: postgres
+  dbPassword: "<填 openssl rand -hex 16 的结果>"
+  dbName: weknora
+  redisUsername: ""
+  redisPassword: "<填 openssl rand -hex 16 的结果>"
+  jwtSecret: "<填 openssl rand -hex 32 的结果>"
+  systemAesKey: "<填 openssl rand -hex 16 的结果，必须 32 字节>"

@@ -1,0 +1,82 @@
+# ---- PersistentVolumes: 手工创建，指向 master01 的 NFS 导出 ----
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: weknora-postgres-pv
+spec:
+  capacity:
+    storage: 8Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  nfs:
+    server: 172.30.30.11
+    path: /nfs/pv01/weknora-postgres
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: weknora-redis-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  nfs:
+    server: 172.30.30.11
+    path: /nfs/pv01/weknora-redis
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: weknora-data-files-pv
+spec:
+  capacity:
+    storage: 8Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  nfs:
+    server: 172.30.30.11
+    path: /nfs/pv01/weknora-data-files
+---
+# ---- PersistentVolumeClaims: 用 volumeName 强制绑定到上面的 PV ----
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: weknora-postgres
+  namespace: weknora
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  volumeName: weknora-postgres-pv
+  resources:
+    requests:
+      storage: 8Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: weknora-redis
+  namespace: weknora
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  volumeName: weknora-redis-pv
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: weknora-data-files
+  namespace: weknora
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  volumeName: weknora-data-files-pv
+  resources:
+    requests:
+      storage: 8Gi

@@ -1,0 +1,12 @@
+# 仓库主要跑在 Linux 上。
+# 不写这段的话，Windows 端 core.autocrlf=true 会把 .sh 存成 CRLF，
+# 到 Linux 上第一行变成 "#!/bin/bash\r" → bad interpreter: /bin/bash^M
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+
+# Helm chart 包是二进制，绝不能做行尾转换
+*.tgz   binary

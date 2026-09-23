@@ -1,0 +1,87 @@
+# ============================================================
+# WeKnora 自定义 values（本地 k8s 集群 / weknora namespace）
+# ============================================================
+# ⚠️ 本文件已脱敏，四个密钥全部是占位符。
+#    真实密钥不进仓库，由 CI 在运行时从 GitHub Secrets 注入
+#    （见 .github/workflows/deploy.yml 的「写密钥 values」步骤）。
+#
+#    本地手动部署时：复制一份 values.local.yaml，填真值，
+#    helm 命令行用 -f values.local.yaml 叠加。该文件已被 .gitignore 忽略。
+# ============================================================
+
+# ---- 全局 ----
+global:
+  # 用 existingClaim，不走动态供应（本集群 SC local-path 无对应 provisioner）
+  storageClass: ""
+  maxFileSizeMB: 50
+
+# ---- 密钥占位符（真值走 GitHub Secrets / values.local.yaml）----
+secrets:
+  dbUser: postgres
+  dbPassword: "<CHANGE_ME>"
+  dbName: weknora
+  redisUsername: ""
+  redisPassword: "<CHANGE_ME>"
+  jwtSecret: "<CHANGE_ME>"
+  # 必须恰好 32 字节（openssl rand -hex 16）；加密租户 api_key / 模型 key，
+  # 丢失则已加密的历史数据永久解不开 —— 迁数据时必须原样保留
+  systemAesKey: "<CHANGE_ME>"
+
+# ---- 存储：指向手工创建并已 Bound 的 PVC ----
+postgresql:
+  persistence:
+    enabled: true
+    existingClaim: weknora-postgres
+  nodeSelector:
+    kubernetes.io/hostname: base
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+redis:
+  persistence:
+    enabled: true
+    existingClaim: weknora-redis
+  nodeSelector:
+    kubernetes.io/hostname: base
+
+dataFiles:
+  persistence:
+    enabled: true
+    existingClaim: weknora-data-files
+
+# ---- 关掉 Neo4j（省 2Gi 内存 + 10Gi 存储，不开 GraphRAG 用不到）----
+neo4j:
+  enabled: false
+
+# ---- 各组件：全部钉到 base 节点（6GB 内存 + 镜像已缓存在这台）----
+app:
+  nodeSelector:
+    kubernetes.io/hostname: base
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+  # ===== 模型服务配置 =====
+  # 注意：WeKnora 的模型配置走数据库 models 表，不走 env。
+  # 这些环境变量只有在额外挂载 config/builtin_models.yaml 时才生效，
+  # 而 chart 不挂这个文件 —— 写了也完全无效，必须通过 Web UI 或 REST API 配。
+  # 详见 docs/WeKnora部署完整文档.md 第十七章。
+
+frontend:
+  nodeSelector:
+    kubernetes.io/hostname: base
+
+docreader:
+  nodeSelector:
+    kubernetes.io/hostname: base
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+# ---- Ingress（集群已有 nginx IngressClass，直接对上 chart 默认值）----
+ingress:
+  enabled: true
+  className: nginx
+  host: weknora.local
+  tls:
+    enabled: false
