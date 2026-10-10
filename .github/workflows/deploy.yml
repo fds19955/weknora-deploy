@@ -1,0 +1,163 @@
+name: Deploy WeKnora
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 为什么不用 actions/checkout@v4？
+#
+#   本集群三个节点对 github.com:443 均不可达（TCP/TLS 握完即挂，DPI 层阻断），
+#   实测 5/5 超时，`git clone https://github.com/...` 直接失败。
+#   而 codeload.github.com / api.github.com / pipelines.actions.githubusercontent.com
+#   都是通的 —— 所以源码改从 codeload 拉 tarball。
+#
+#   同理，任何依赖 github.com 下载的第三方 action 都不能用（含 actions/setup-*），
+#   因此下面所有步骤都是纯 shell，零外部 action 依赖。
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+    # 只在真正影响部署的文件变动时触发，避免改个 README 就升级一次 release
+    paths:
+      - 'deploy/**'
+      - 'chart/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只渲染不部署（helm --dry-run），用于验证模板'
+        type: boolean
+        default: false
+
+# 同一个 release 的部署串行化，绝不允许两个 helm upgrade 并发打架
+concurrency:
+  group: weknora-cd
+  cancel-in-progress: false
+
+env:
+  RELEASE: weknora
+  NAMESPACE: weknora
+  # systemd 服务里的 HOME 未必可靠，显式钉死 kubeconfig，否则 kubectl 报"no configuration"
+  KUBECONFIG: /home/candidate/.kube/config
+
+jobs:
+  deploy:
+    name: helm upgrade on local cluster
+    # 自定义 label，只有装了 weknora-local tag 的 runner 才会接这个活
+    runs-on: [self-hosted, weknora-local]
+    timeout-minutes: 20
+
+    steps:
+      - name: 环境自检
+        run: |
+          set -euo pipefail
+          echo "runner   : $(hostname)"
+          echo "workspace: $GITHUB_WORKSPACE"
+          echo "commit   : $GITHUB_SHA"
+          helm version --short
+          kubectl version --client=true
+          kubectl get nodes
+
+      - name: 拉取源码（走 codeload，绕开被墙的 github.com）
+        run: |
+          set -euo pipefail
+          URL="https://codeload.github.com/${GITHUB_REPOSITORY}/tar.gz/${GITHUB_SHA}"
+          echo "下载 $URL"
+          # --retry-all-errors 是必须的：这台机器链路慢（实测约 60KB/s），
+          # curl 默认只对少数错误重试，中途断流会被判成致命错误
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 \
+               --connect-timeout 20 -o "$RUNNER_TEMP/src.tgz" "$URL"
+          mkdir -p "$GITHUB_WORKSPACE/src"
+          tar -xzf "$RUNNER_TEMP/src.tgz" --strip-components=1 -C "$GITHUB_WORKSPACE/src"
+          echo "--- 取到的内容 ---"
+          ls -la "$GITHUB_WORKSPACE/src"
+
+      - name: 定位 chart 包
+        run: |
+          set -euo pipefail
+          # 仓库里 chart/ 放的是打包好的 .tgz（helm package 产物），不是解开的目录，
+          # 所以要把具体文件名解析出来：helm 只认「目录里有 Chart.yaml」或「.tgz 文件本身」，
+          # 给一个「装着 tgz 的目录」会报 Chart.yaml missing。
+          CHART_PATH="$(ls "$GITHUB_WORKSPACE"/src/chart/*.tgz 2>/dev/null | head -1)"
+          if [ -z "$CHART_PATH" ]; then
+            echo "::error::src/chart 下没有找到 .tgz 包"
+            exit 1
+          fi
+          echo "CHART_PATH=$CHART_PATH" >> "$GITHUB_ENV"
+          echo "chart 包：$CHART_PATH"
+
+      - name: 写密钥 values（落到 runner 临时目录，job 结束自动清理）
+        env:
+          IN_DB_PASSWORD: ${{ secrets.WEKNORA_DB_PASSWORD }}
+          IN_REDIS_PASSWORD: ${{ secrets.WEKNORA_REDIS_PASSWORD }}
+          IN_JWT_SECRET: ${{ secrets.WEKNORA_JWT_SECRET }}
+          IN_SYSTEM_AES_KEY: ${{ secrets.WEKNORA_SYSTEM_AES_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077   # 文件只对自己可读
+
+          # 为什么不直接 --set？--set 的值会短暂出现在进程列表里，
+          # 且被 helm 原样记进 release 历史。落临时文件更干净。
+          # 注意：这里不做 rm 清理 —— $RUNNER_TEMP 由 runner 每个 job 自动清空，
+          # 少一条删除命令就少一份误删风险。
+          cat > "$RUNNER_TEMP/secrets.yaml" <<EOF
+          secrets:
+            dbUser: postgres
+            dbPassword: "${IN_DB_PASSWORD}"
+            dbName: weknora
+            redisUsername: ""
+            redisPassword: "${IN_REDIS_PASSWORD}"
+            jwtSecret: "${IN_JWT_SECRET}"
+            systemAesKey: "${IN_SYSTEM_AES_KEY}"
+          EOF
+
+          # 防呆：密钥必须已配置。空值会让 postgres 用空密码初始化，
+          # 直接把现有数据卷锁死（认证失败），代价极大，所以在这里拦死。
+          for v in IN_DB_PASSWORD IN_REDIS_PASSWORD IN_JWT_SECRET IN_SYSTEM_AES_KEY; do
+            if [ -z "${!v}" ]; then
+              echo "::error::GitHub Secrets 里缺少 $v —— 请先在仓库 Settings → Secrets 配置"
+              exit 1
+            fi
+          done
+          echo "密钥文件已生成（长度校验通过）"
+
+      - name: 幂等应用存储（PV/PVC）
+        run: |
+          set -euo pipefail
+          # namespace 不存在则建，存在则不动（--dry-run=client 生成后 apply，天然幂等）
+          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+          # 只 apply，绝不 delete：PVC 一旦删除，NFS 上的数据就找不回来了
+          kubectl apply -f "$GITHUB_WORKSPACE/src/deploy/storage.yaml"
+          kubectl get pvc -n "$NAMESPACE"
+
+      - name: helm lint
+        run: |
+          set -euo pipefail
+          helm lint "$CHART_PATH" \
+            -f "$GITHUB_WORKSPACE/src/deploy/values.yaml" \
+            -f "$RUNNER_TEMP/secrets.yaml"
+
+      - name: helm upgrade --install
+        run: |
+          set -euo pipefail
+          DRY=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            DRY="--dry-run"
+            echo "::notice::dry_run 模式，只渲染不下发"
+          fi
+
+          # 这里刻意不用 --atomic：失败时 helm 会自动 rollback，
+          # 而首次 install 的 rollback 等价于 uninstall，会把现场拆掉，
+          # 出问题时反而没法看日志。目标集群优先保现场 -> 只 --wait。
+          helm upgrade --install "$RELEASE" "$CHART_PATH" \
+            --namespace "$NAMESPACE" \
+            -f "$GITHUB_WORKSPACE/src/deploy/values.yaml" \
+            -f "$RUNNER_TEMP/secrets.yaml" \
+            --wait --timeout 10m $DRY
+
+      - name: 部署结果
+        if: always()
+        run: |
+          set -euo pipefail
+          helm status "$RELEASE" -n "$NAMESPACE" 2>&1 || true
+          kubectl get pods -n "$NAMESPACE" -o wide 2>&1 || true
+          echo "--- revision 历史 ---"
+          helm history "$RELEASE" -n "$NAMESPACE" 2>&1 || true
